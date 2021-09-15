@@ -1,5 +1,10 @@
 package de.kai_morich.simple_bluetooth_le_terminal;
 
+/*
+Note: ESP32 BLE SPP doesn't support write credits so I use Integer.MAX_VALUE. Remember to fix ESP32
+ */
+
+
 import android.app.Activity;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -53,14 +58,28 @@ class SerialSocket extends BluetoothGattCallback {
     // https://play.google.com/store/apps/details?id=com.telit.tiosample
     // https://www.telit.com/wp-content/uploads/2017/09/TIO_Implementation_Guide_r6.pdf
     private static final UUID BLUETOOTH_LE_TIO_SERVICE          = UUID.fromString("0000FEFB-0000-1000-8000-00805F9B34FB");
+    //rx: 0001 write without response to peripheral
     private static final UUID BLUETOOTH_LE_TIO_CHAR_TX          = UUID.fromString("00000001-0000-1000-8000-008025000000"); // WNR
+    //tx: 0002 receive data from the peripheral
     private static final UUID BLUETOOTH_LE_TIO_CHAR_RX          = UUID.fromString("00000002-0000-1000-8000-008025000000"); // N
+    //credits rx: 0003 transmit credits to the peripheral (serial data flow control)
     private static final UUID BLUETOOTH_LE_TIO_CHAR_TX_CREDITS  = UUID.fromString("00000003-0000-1000-8000-008025000000"); // W
+    //credits tx: 0004 receive credits from the peripheral (serial data flow control)
     private static final UUID BLUETOOTH_LE_TIO_CHAR_RX_CREDITS  = UUID.fromString("00000004-0000-1000-8000-008025000000"); // I
+
+    //
+    private static final UUID ESP32_LE_SPP_SERVICE    = UUID.fromString("0000abf0-0000-1000-8000-00805f9b34fb");
+    //rx: abf1 write without response
+    private static final UUID ESP32_LE_DATA_RX        = UUID.fromString("0000abf1-0000-1000-8000-00805f9b34fb");
+    //tx: abf2 receive read data notify
+    private static final UUID ESP32_LE_DATA_NOTIFY    = UUID.fromString("0000abf2-0000-1000-8000-00805f9b34fb");
+    private static final UUID ESP32_LE_COMMAND_RX     = UUID.fromString("0000abf3-0000-1000-8000-00805f9b34fb");
+    private static final UUID ESP32_LE_COMMAND_NOTIFY = UUID.fromString("0000abf4-0000-1000-8000-00805f9b34fb");
+
 
     private static final int MAX_MTU = 512; // BLE standard does not limit, some BLE 4.2 devices support 251, various source say that Android has max 512
     private static final int DEFAULT_MTU = 23;
-    private static final String TAG = "SerialSocket";
+    private static final  String TAG = "SerialSocket";
 
     private final ArrayList<byte[]> writeBuffer;
     private final IntentFilter pairingIntentFilter;
@@ -217,6 +236,7 @@ class SerialSocket extends BluetoothGattCallback {
     private void connectCharacteristics1(BluetoothGatt gatt) {
         boolean sync = true;
         writePending = false;
+
         for (BluetoothGattService gattService : gatt.getServices()) {
             if (gattService.getUuid().equals(BLUETOOTH_LE_CC254X_SERVICE))
                 delegate = new Cc245XDelegate();
@@ -226,6 +246,8 @@ class SerialSocket extends BluetoothGattCallback {
                 delegate = new NrfDelegate();
             if (gattService.getUuid().equals(BLUETOOTH_LE_TIO_SERVICE))
                 delegate = new TelitDelegate();
+            if (gattService.getUuid().equals(ESP32_LE_SPP_SERVICE))
+                delegate = new ESP32Delegate();
 
             if(delegate != null) {
                 sync = delegate.connectCharacteristics(gattService);
@@ -591,6 +613,149 @@ class SerialSocket extends BluetoothGattCallback {
                 synchronized (writeBuffer) {
                     if (writeCredits > 0)
                         writeCredits -= 1;
+                }
+                Log.d(TAG, "write finished, credits=" + writeCredits);
+            }
+            if(characteristic == writeCreditsCharacteristic) { // NOPMD - test object identity
+                Log.d(TAG,"write credits finished, status="+status);
+            }
+        }
+
+        @Override
+        boolean canWrite() {
+            if(writeCredits > 0)
+                return true;
+            Log.d(TAG, "no write credits");
+            return false;
+        }
+
+        @Override
+        void disconnect() {
+            readCreditsCharacteristic = null;
+            writeCreditsCharacteristic = null;
+        }
+
+        private void grantReadCredits() {
+            final int minReadCredits = 16;
+            final int maxReadCredits = 64;
+            if(readCredits > 0)
+                readCredits -= 1;
+            if(readCredits <= minReadCredits) {
+                int newCredits = maxReadCredits - readCredits;
+                readCredits += newCredits;
+                byte[] data = new byte[] {(byte)newCredits};
+                Log.d(TAG, "grant read credits +"+newCredits+" ="+readCredits);
+                writeCreditsCharacteristic.setValue(data);
+                if (!gatt.writeCharacteristic(writeCreditsCharacteristic)) {
+                    if(connected)
+                        onSerialIoError(new IOException("write read credits failed"));
+                    else
+                        onSerialConnectError(new IOException("write read credits failed"));
+                }
+            }
+        }
+
+    }
+
+    private class ESP32Delegate extends DeviceDelegate {
+        private BluetoothGattCharacteristic readCreditsCharacteristic, writeCreditsCharacteristic;
+        private int readCredits, writeCredits;
+
+        @Override
+        boolean connectCharacteristics(BluetoothGattService gattService) {
+            Log.d(TAG, "service telit tio 2.0");
+            readCredits = 0;
+            writeCredits = Integer.MAX_VALUE;
+            readCharacteristic = gattService.getCharacteristic(ESP32_LE_DATA_NOTIFY);
+            writeCharacteristic = gattService.getCharacteristic(ESP32_LE_DATA_RX);
+            readCreditsCharacteristic = gattService.getCharacteristic(ESP32_LE_COMMAND_NOTIFY);
+            writeCreditsCharacteristic = gattService.getCharacteristic(ESP32_LE_COMMAND_RX);
+            if (readCharacteristic == null) {
+                onSerialConnectError(new IOException("read characteristic not found"));
+                return false;
+            }
+            if (writeCharacteristic == null) {
+                onSerialConnectError(new IOException("write characteristic not found"));
+                return false;
+            }
+            if (readCreditsCharacteristic == null) {
+                onSerialConnectError(new IOException("read credits characteristic not found"));
+                return false;
+            }
+            if (writeCreditsCharacteristic == null) {
+                onSerialConnectError(new IOException("write credits characteristic not found"));
+                return false;
+            }
+            if (!gatt.setCharacteristicNotification(readCreditsCharacteristic, true)) {
+                onSerialConnectError(new IOException("no notification for read credits characteristic"));
+                return false;
+            }
+            BluetoothGattDescriptor readCreditsDescriptor = readCreditsCharacteristic.getDescriptor(BLUETOOTH_LE_CCCD);
+            if (readCreditsDescriptor == null) {
+                onSerialConnectError(new IOException("no CCCD descriptor for read credits characteristic"));
+                return false;
+            }
+            readCreditsDescriptor.setValue(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE);
+            Log.d(TAG,"writing read credits characteristic descriptor");
+            if (!gatt.writeDescriptor(readCreditsDescriptor)) {
+                onSerialConnectError(new IOException("read credits characteristic CCCD descriptor not writable"));
+                return false;
+            }
+            Log.d(TAG, "writing read credits characteristic descriptor");
+            return false;
+            // continues asynchronously in connectCharacteristics2
+        }
+
+        @Override
+        void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
+            if(descriptor.getCharacteristic() == readCreditsCharacteristic) {
+                Log.d(TAG, "writing read credits characteristic descriptor finished, status=" + status);
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    onSerialConnectError(new IOException("write credits descriptor failed"));
+                } else {
+                    connectCharacteristics2(gatt);
+                }
+            }
+            if(descriptor.getCharacteristic() == readCharacteristic) {
+                Log.d(TAG, "writing read characteristic descriptor finished, status=" + status);
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    readCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+                    writeCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+                    grantReadCredits();
+                    // grantReadCredits includes gatt.writeCharacteristic(writeCreditsCharacteristic)
+                    // but we do not have to wait for confirmation, as it is the last write of connect phase.
+                }
+            }
+        }
+
+        @Override
+        void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
+            if(characteristic == readCreditsCharacteristic) { // NOPMD - test object identity
+                int newCredits = readCreditsCharacteristic.getValue()[0];
+                synchronized (writeBuffer) {
+                    writeCredits += newCredits;
+                }
+                Log.d(TAG, "got write credits +"+newCredits+" ="+writeCredits);
+
+                if (!writePending && !writeBuffer.isEmpty()) {
+                    Log.d(TAG, "resume blocked write");
+                    writeNext();
+                }
+            }
+            if(characteristic == readCharacteristic) { // NOPMD - test object identity
+                grantReadCredits();
+                Log.d(TAG, "read, credits=" + readCredits);
+            }
+        }
+
+        @Override
+        void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
+            if(characteristic == writeCharacteristic) { // NOPMD - test object identity
+                synchronized (writeBuffer) {
+
+                    if( writeCredits > 0) {
+                            writeCredits -= 1;
+                    }
                 }
                 Log.d(TAG, "write finished, credits=" + writeCredits);
             }
