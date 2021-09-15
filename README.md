@@ -1,4 +1,21 @@
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/3f9ba45b5c5449179150010659311f57)](https://www.codacy.com/manual/kai-morich/SimpleBluetoothLeTerminal?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=kai-morich/SimpleBluetoothLeTerminal&amp;utm_campaign=Badge_Grade)
+This is a fork of https://github.com/kai-morich/SimpleBluetoothLeTerminal
+
+My hardware is ESP32-C3 based and that code does not support ESP32 so I managed to port it over and got it working with the esp32_spp_server.cpp demo which espressif provides.  (see https://github.com/BrianAtDocumentedDesigns/SimpleBluetoothLeTerminal/tree/ESP32_C3_SPP_Support). 
+
+I am pretty sure the ESP32 spp server does not implement flow control so I set 
+
+            writeCredits = Integer.MAX_VALUE;
+
+as a sort of a kludge.
+
+I know I am not much of a programmer but I thought I'd let you know in case you were interested in incorporating support for the popular ESP32 family into your code.
+
+I will probably add flow control to the ESP32 code when I make some progress on my project.
+
+Here is the readme from the https://github.com/kai-morich/SimpleBluetoothLeTerminal
+
+==============================
+
 
 # SimpleBluetoothLeTerminal
 
